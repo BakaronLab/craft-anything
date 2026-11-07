@@ -480,7 +480,8 @@ impl AiHub {
 
     /// Add an OpenAI-compatible server by its address: Ollama or LM Studio on another computer, or
     /// a hosted service with its key. It's added only when it answers with its models; without a
-    /// model, the first one it lists that can chat is used. Returns the model.
+    /// model, the first one it lists that can chat is used. Returns the model. Anthropic's own
+    /// address is added as an Anthropic backend, as its API isn't OpenAI's.
     pub fn add_server(&self, name: &str, address: &str, model: Option<&str>, key: Option<String>) -> Result<String, ToolError> {
         let name = name.trim();
         let address = address.trim().trim_end_matches('/');
@@ -492,9 +493,15 @@ impl AiHub {
                 .with_remediation("Give the server's address, like http://192.168.1.20:11434/v1."));
         }
         let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
-        // OpenCode Go lists its models at /v1, not under the chat path a person would paste.
-        let probe = if openai::is_opencode_go(address) { opencode_go_models_base(address) } else { address.to_string() };
-        let models = openai::OpenAi::compatible(name, &probe, key.clone(), "").list_models(Duration::from_secs(10)).map_err(|e| {
+        let kind = if anthropic::is_anthropic_api(address) { BackendKind::Anthropic } else { BackendKind::OpenaiCompatible };
+        let listed = if kind == BackendKind::Anthropic {
+            anthropic::Anthropic::new(Some(address), key.clone().unwrap_or_default(), "").list_models(Duration::from_secs(10))
+        } else {
+            // OpenCode Go lists its models at /v1, not under the chat path a person would paste.
+            let probe = if openai::is_opencode_go(address) { opencode_go_models_base(address) } else { address.to_string() };
+            openai::OpenAi::compatible(name, &probe, key.clone(), "").list_models(Duration::from_secs(10))
+        };
+        let models = listed.map_err(|e| {
             let why = e.message.clone();
             e.with_remediation(format!(
                 "Check the address (it usually ends in /v1), that the server is running and can be reached from this computer, and its key if it needs one. ({why})"
@@ -508,14 +515,7 @@ impl AiHub {
                     .with_remediation("Load a chat model on the server first, or enter the name of a chat model you know is available.")
             })?,
         };
-        let config = BackendConfig {
-            name: name.to_string(),
-            kind: BackendKind::OpenaiCompatible,
-            model: model.clone(),
-            base_url: Some(address.to_string()),
-            ssh_host: None,
-            enabled: true,
-        };
+        let config = BackendConfig { name: name.to_string(), kind, model: model.clone(), base_url: Some(address.to_string()), ssh_host: None, enabled: true };
         self.add_backend(config, key)?;
         Ok(model)
     }
