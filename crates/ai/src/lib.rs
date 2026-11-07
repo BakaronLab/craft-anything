@@ -886,10 +886,10 @@ impl AiHub {
     /// A builder conversation on an API backend: our agent loop with the Build toolset (files and
     /// commands in the project) enabled from the start, and room for a long build. In Deep mode
     /// every toolset is enabled, so it can look inside the original with all of them.
-    /// `transcript`: where the conversation is kept, and resumed from when it's there.
-    pub fn start_builder(&self, entry: &BackendEntry, beginner: bool, transcript: Option<PathBuf>) -> Result<ApiConversation, ToolError> {
+    /// `transcript`: where the conversation is kept, and resumed from when it's there. `deep` is
+    /// the run's mode, given by the caller: a tool that starts a build holds the session (#1102).
+    pub fn start_builder(&self, entry: &BackendEntry, beginner: bool, transcript: Option<PathBuf>, deep: bool) -> Result<ApiConversation, ToolError> {
         use craft_anything_engine::Toolset;
-        let deep = !self.engine.session().clean_room();
         let toolsets = if deep { self.engine.registry().toolsets() } else { vec![Toolset::Core, Toolset::Build] };
         self.start_loop(entry, beginner, transcript, &toolsets, true)
     }
