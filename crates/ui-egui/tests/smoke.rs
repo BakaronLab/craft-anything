@@ -2054,6 +2054,30 @@ fn a_projects_saved_time_and_ai_use_show_beside_it_and_the_session_total_in_the_
 }
 
 #[test]
+fn a_big_cost_doesnt_paint_over_its_caption() {
+    use craft_anything_engine::workspace::ProjectUsage;
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().to_path_buf();
+    ProjectUsage::update(&root, |u| {
+        u.work_ms = 725_000;
+        u.add_turn(1_180_000, 42_000, Some(13_021.36), true);
+    })
+    .unwrap();
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        demo::fill_project(&mut a);
+        if let Some(ws) = a.workspace.as_mut() {
+            ws.root = root.clone();
+        }
+        a
+    });
+    h.run_steps(3);
+    let caption = h.get_by_label("AI cost (estimate)").rect();
+    let value = h.get_by_label("about $13021.36").rect();
+    assert!(!caption.intersects(value), "{caption:?} and {value:?}");
+}
+
+#[test]
 fn ghidras_memory_is_automatic_until_the_person_sets_it() {
     let mut h = harness_sized(egui::vec2(1280.0, 1000.0), || {
         let mut a = demo::app(demo::engine(Mode::Beginner, true));
