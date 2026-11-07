@@ -149,6 +149,11 @@ and releasing a shared ephemeral port.
 same temp directory, and game detection walked up and found the game. Give each case its own
 `tempfile::tempdir()`.
 
+**Tests that share a process-wide value.** The start guard keeps its mark's lock in a `static`;
+one test's `opened()` emptied it while another test was between `begin` and its check, so
+`main` failed now and then although the PR's own run had passed. Tests that touch the same `static` take a
+shared test lock, even when each uses its own temp folder.
+
 **A mock server closed on a partial request.** A loopback fixture read a request only once, then
 replied and closed. TCP can split even a short header; unread bytes made that close reset the
 connection. Consume the complete header before replying, with a size cap and an absolute deadline.
