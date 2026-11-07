@@ -230,6 +230,13 @@ mod tests {
         assert_eq!((linux.format, linux.strip_prefix), (crate::ArchiveFormat::TarGz, None), "Linux keeps jdk-…/bin/java, one folder down");
     }
 
+    /// Ghidra's folder holds both scripts; the `.bat` can't start off Windows (#1084).
+    #[test]
+    fn the_launcher_looked_for_on_path_is_this_systems_own() {
+        let exes = crate::engine(ID).unwrap().host_exes();
+        assert_eq!(exes, [if cfg!(windows) { "analyzeHeadless.bat" } else { "analyzeHeadless" }]);
+    }
+
     #[test]
     fn finds_ghidra_and_java_where_they_really_live() {
         let d = tempfile::tempdir().unwrap();
