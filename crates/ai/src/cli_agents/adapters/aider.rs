@@ -47,6 +47,25 @@ const KEY_FILES: &[&str] = &[".env", ".aider/oauth-keys.env"];
 /// The most of a settings file we read while checking.
 const SETTINGS_FILE_CAP: u64 = 1024 * 1024;
 
+/// Aider's model shortcut flags; each one chooses the model, so none needs `--model`.
+const MODEL_SHORTCUTS: &[&str] = &[
+    "--opus",
+    "--sonnet",
+    "--haiku",
+    "--4",
+    "-4",
+    "--4o",
+    "--mini",
+    "--4-turbo",
+    "--35turbo",
+    "--35-turbo",
+    "--3",
+    "-3",
+    "--deepseek",
+    "--o1-mini",
+    "--o1-preview",
+];
+
 pub struct Aider;
 
 impl AgentAdapter for Aider {
@@ -99,8 +118,13 @@ impl AgentAdapter for Aider {
 /// name. `None` means Aider would pick one from whichever key it finds, or offer a sign-in.
 fn configured_model(options: &BackendOptions, env: &dyn Fn(&str) -> Option<String>, home: Option<&Path>) -> Option<String> {
     model_in_args(&options.args)
+        .or_else(|| options.args.iter().find(|a| MODEL_SHORTCUTS.contains(&a.as_str())).cloned())
         .or_else(|| options.cli_model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(str::to_string))
         .or_else(|| env("AIDER_MODEL").map(|m| m.trim().to_string()).filter(|m| !m.is_empty()))
+        .or_else(|| {
+            let home = home?;
+            KEY_FILES.iter().find_map(|file| env_file_value(&read_small(&home.join(file))?, "AIDER_MODEL"))
+        })
         .or_else(|| {
             let text = read_small(&home?.join(".aider.conf.yml"))?;
             model_in_conf(&text)
@@ -147,21 +171,37 @@ fn key_in_args(args: &[String], name: &str) -> bool {
     })
 }
 
-/// Whether a key is set in the environment, in Aider's arguments, or in one of its key files.
+/// Whether a key is set in the environment (bare or `AIDER_`-prefixed), in Aider's arguments,
+/// or in one of its key or config files.
 fn key_seen(name: &str, options: &BackendOptions, env: &dyn Fn(&str) -> Option<String>, home: Option<&Path>) -> bool {
-    if env(name).is_some_and(|v| !v.trim().is_empty()) || key_in_args(&options.args, name) {
+    let prefixed = format!("AIDER_{name}");
+    let names = [name, prefixed.as_str()];
+    if names.iter().any(|n| env(n).is_some_and(|v| !v.trim().is_empty())) || key_in_args(&options.args, name) {
         return true;
     }
-    home.is_some_and(|home| KEY_FILES.iter().any(|file| read_small(&home.join(file)).is_some_and(|text| value_in_env_file(&text, name))))
+    home.is_some_and(|home| {
+        KEY_FILES.iter().any(|file| read_small(&home.join(file)).is_some_and(|text| names.iter().any(|n| env_file_value(&text, n).is_some())))
+            || read_small(&home.join(".aider.conf.yml")).is_some_and(|text| conf_sets_key(&text, name))
+    })
 }
 
-/// `NAME=value` in a dotenv file, with or without `export` and around quotes.
-fn value_in_env_file(text: &str, name: &str) -> bool {
-    text.lines().any(|line| {
+/// The value of `NAME=value` in a dotenv file, with or without `export` and around quotes.
+fn env_file_value(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
         let line = line.trim();
         let line = line.strip_prefix("export ").unwrap_or(line);
-        let Some((key, value)) = line.split_once('=') else { return false };
-        key.trim() == name && !value.trim().trim_matches(['"', '\'']).is_empty()
+        let (key, value) = line.split_once('=')?;
+        let value = value.trim().trim_matches(['"', '\'']);
+        (key.trim() == name && !value.is_empty()).then(|| value.to_string())
+    })
+}
+
+/// A `provider=KEY` or `NAME=VALUE` list item in Aider's config (`api-key:` / `set-env:`).
+fn conf_sets_key(text: &str, name: &str) -> bool {
+    let provider = name.strip_suffix("_API_KEY").unwrap_or(name).to_ascii_lowercase();
+    text.lines().any(|line| {
+        let line = line.trim().trim_start_matches('-').trim().trim_matches(['"', '\'']);
+        [name, provider.as_str()].iter().any(|n| line.strip_prefix(*n).and_then(|rest| rest.strip_prefix('=')).is_some_and(|v| !v.trim().is_empty()))
     })
 }
 
@@ -181,7 +221,7 @@ fn check_setup(options: &BackendOptions, env: &dyn Fn(&str) -> Option<String>, h
             "Aider has no model or API key set up, so it would offer to sign in to OpenRouter and wait for a browser nobody is at.",
         )
         .with_remediation(
-            "Choose Aider's model in Settings (AI → Aider), or set OPENROUTER_API_KEY, ANTHROPIC_API_KEY or OPENAI_API_KEY for the computer Craft Anything runs on. Aider's own ~/.aider.conf.yml and ~/.env count too.",
+                        "Set OPENROUTER_API_KEY, ANTHROPIC_API_KEY or OPENAI_API_KEY for the computer Craft Anything runs on, or name a model in Aider's own ~/.aider.conf.yml. Aider's ~/.env counts too.",
         )),
         Some(model) if model.starts_with("openrouter/") && !key_seen("OPENROUTER_API_KEY", options, env, home) => Err(ToolError::new(
             ErrorCode::BadSettings,
@@ -244,7 +284,7 @@ mod tests {
         assert_eq!(err.code, ErrorCode::BadSettings);
         assert!(err.message.contains("sign in to OpenRouter"), "{}", err.message);
         let fix = err.remediation.unwrap_or_default();
-        assert!(fix.contains("Settings") && fix.contains("OPENAI_API_KEY"), "{fix}");
+        assert!(fix.contains("~/.aider.conf.yml") && fix.contains("OPENAI_API_KEY"), "{fix}");
     }
 
     #[test]
@@ -290,5 +330,28 @@ mod tests {
         let options = BackendOptions { args: vec!["--model=anthropic/claude-sonnet-4".into()], ..Default::default() };
         assert_eq!(model_in_args(&options.args).as_deref(), Some("anthropic/claude-sonnet-4"));
         assert!(check_setup(&options, &|_| None, None).is_ok());
+    }
+
+    #[test]
+    fn a_model_shortcut_flag_counts_as_a_model() {
+        let options = BackendOptions { args: vec!["--sonnet".into()], ..Default::default() };
+        assert!(no_keys(&options).is_ok(), "a shortcut flag chooses the model");
+    }
+
+    #[test]
+    fn an_aider_prefixed_variable_counts_as_a_key() {
+        let env = |name: &str| (name == "AIDER_OPENAI_API_KEY").then(|| "sk-test".to_string());
+        assert!(check_setup(&BackendOptions::default(), &env, None).is_ok());
+    }
+
+    #[test]
+    fn a_model_or_key_in_the_home_dotenv_or_config_list_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "AIDER_MODEL=gpt-4o\n").unwrap();
+        assert!(check_setup(&BackendOptions::default(), &|_| None, Some(dir.path())).is_ok());
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".aider.conf.yml"), "api-key:\n  - openai=sk-test\n").unwrap();
+        assert!(check_setup(&BackendOptions::default(), &|_| None, Some(dir.path())).is_ok());
     }
 }
