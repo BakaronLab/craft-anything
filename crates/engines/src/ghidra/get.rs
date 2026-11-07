@@ -30,7 +30,7 @@ pub fn can_install() -> bool {
 /// folders where an unpacked copy is usually kept (#740).
 pub fn headless(install_dir: Option<&Path>, store: &Path) -> Option<PathBuf> {
     headless_configured(install_dir, store)
-        .or_else(|| crate::find_on_path(&["analyzeHeadless.bat", "analyzeHeadless"]))
+        .or_else(|| crate::find_on_path(crate::engine(ID)?.host_exes()))
         .or_else(|| crate::well_known(ID).into_iter().find(|p| p.is_file()))
         .or_else(|| {
             let e = crate::engine(ID)?;
