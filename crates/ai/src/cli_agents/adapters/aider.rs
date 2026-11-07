@@ -17,8 +17,7 @@
 //! with no OpenRouter key (#72).
 //!
 //! Outside a build the message may only read, so `--dry-run` stops Aider writing files. Its own
-//! reads aren't checked in a Clean room, the same gap as other agents that never ask us; the
-//! approval decision in the roadmap (R2.2) covers it.
+//! reads can't be checked, so a Clean room run is refused in `validate_access`, as for Grok (R2.2).
 
 use super::*;
 use std::path::Path;
@@ -98,6 +97,17 @@ impl AgentAdapter for Aider {
     fn plain_fallback(&self) -> bool {
         false
     }
+    /// Aider reads whatever files it likes and never asks us, so a Clean room run can't hold it
+    /// back. Grok is refused for the same reason (R2.2).
+    fn validate_access(&self, access: Access) -> Result<(), ToolError> {
+        match access {
+            Access::CleanRoomAnalyse | Access::CleanRoomBuild | Access::CleanRoomQuestion => {
+                Err(ToolError::invalid("Aider reads files on its own without asking, so a Clean room run can't hold it back.")
+                    .with_remediation("Use a deep build for Aider. Its reads aren't checked, so it can't be kept out of the original's files."))
+            }
+            _ => Ok(()),
+        }
+    }
 
     fn streams_json(&self) -> bool {
         false
@@ -145,10 +155,22 @@ fn model_in_args(args: &[String]) -> Option<String> {
     found
 }
 
+/// A value without a trailing ` # comment`. Quoted values are left alone.
+fn strip_comment(value: &str) -> &str {
+    let value = value.trim();
+    if value.starts_with(['"', '\'']) {
+        return value;
+    }
+    if value.starts_with('#') {
+        return "";
+    }
+    value.split_once(" #").map_or(value, |(v, _)| v).trim()
+}
+
 /// A top-level `model:` in Aider's own config file.
 fn model_in_conf(text: &str) -> Option<String> {
     text.lines().find_map(|line| {
-        let value = line.strip_prefix("model:")?.trim().trim_matches(['"', '\'']);
+        let value = strip_comment(line.strip_prefix("model:")?).trim_matches(['"', '\'']);
         (!value.is_empty()).then(|| value.to_string())
     })
 }
@@ -191,7 +213,7 @@ fn env_file_value(text: &str, name: &str) -> Option<String> {
         let line = line.trim();
         let line = line.strip_prefix("export ").unwrap_or(line);
         let (key, value) = line.split_once('=')?;
-        let value = value.trim().trim_matches(['"', '\'']);
+        let value = strip_comment(value).trim_matches(['"', '\'']);
         (key.trim() == name && !value.is_empty()).then(|| value.to_string())
     })
 }
@@ -353,5 +375,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".aider.conf.yml"), "api-key:\n  - openai=sk-test\n").unwrap();
         assert!(check_setup(&BackendOptions::default(), &|_| None, Some(dir.path())).is_ok());
+    }
+
+    #[test]
+    fn a_clean_room_run_is_refused_and_other_modes_are_not() {
+        for access in [Access::CleanRoomAnalyse, Access::CleanRoomBuild, Access::CleanRoomQuestion] {
+            let err = Aider.validate_access(access).expect_err("a clean room can't hold Aider back");
+            assert!(err.remediation.unwrap_or_default().contains("deep build"));
+        }
+        for access in [Access::Build, Access::Analyse, Access::Question] {
+            assert!(Aider.validate_access(access).is_ok());
+        }
+    }
+
+    #[test]
+    fn an_inline_comment_is_not_part_of_a_value() {
+        assert_eq!(model_in_conf("model: gpt-4o # my favourite\n").as_deref(), Some("gpt-4o"));
+        assert_eq!(model_in_conf("model: # none yet\n"), None);
+        assert_eq!(env_file_value("AIDER_MODEL=gpt-4o # note\n", "AIDER_MODEL").as_deref(), Some("gpt-4o"));
+        assert_eq!(env_file_value("AIDER_MODEL= # unset\n", "AIDER_MODEL"), None);
     }
 }
